@@ -1,0 +1,34 @@
+# Public repo .gitignore — paranoid allowlist style.
+# Anything not explicitly under the public file tree is ignored by default.
+# This file exists so an accidental `cp -r` of the private tree doesn't leak.
+
+# Ignore everything by default
+*
+
+# Then re-allow only the public surface
+!README.md
+!LICENSE
+!.gitignore
+!corpus/
+!corpus/**
+!archetypes/
+!archetypes/_index.md
+
+# Belt-and-suspenders: explicitly block anything that might sneak in
+archetypes/01-*
+archetypes/02-*
+archetypes/03-*
+archetypes/04-*
+archetypes/05-*
+archetypes/06-*
+archetypes/07-*
+archetypes/08-*
+skill/
+launch/
+progress.txt
+.swept-branches.yaml
+.lesson-usage.jsonl
+demotions.jsonl
+.DS_Store
+*.swp
+*~
