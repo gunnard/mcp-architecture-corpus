@@ -516,12 +516,166 @@ re-`read_resource` to see updates. Doesn't compose cleanly with stateless tool c
 
 ---
 
+## P-26: Resource Resolver Tool
+
+**Rule:** When a domain has N entity types reachable via stable URLs (issues, traces,
+replays, profiles, …), expose ONE polymorphic `get_resource(url | type+id)` tool instead
+of N specific `get_X_details(id)` tools. Keep the per-type handlers as **internal helpers**
+for code reuse, but **filter them out of the externally-advertised tool list** so they
+do not consume LLM tool slots.
+
+**Why it works:**
+
+- LLM tool slots are scarce (Sentry's AGENTS.md states `Target ≤20, hard limit 25`).
+  One resolver replaces five details.
+- The natural input the LLM has is usually a URL (developer pastes
+  `sentry.io/.../issues/ABC-123`); URL parsing inside the resolver avoids forcing the
+  LLM to extract IDs and pick the right `get_X_details` variant.
+- Per-type handlers stay testable and reusable internally — they are just no longer in
+  the public tool index.
+
+**Observed in:** Sentry MCP — `tools/get-sentry-resource.ts` accepts `url` OR
+`(resourceType, resourceId, organizationSlug)`, switches on type, dispatches to
+`getIssueDetails`, `getTraceDetails`, `getProfileDetails`, `getReplayDetails`,
+`getSnapshotDetails`. Index comment: *"Legacy detail handlers stay available for
+internal composition behind `get_sentry_resource`, but are filtered from all external
+MCP surfaces."*
+
+**Apply when:** Domain has ≥3 entity types reachable via stable URLs, AND the LLM-side
+workflow nearly always starts from a copy-pasted URL.
+
+**Don't apply when:** Per-type entities have materially different parameter sets, auth
+scopes, or rate limits — the resolver becomes a god-tool in disguise (AP-03).
+
+**Counter-consideration:** Resolver responses are heterogeneous by type. Document
+per-type response shapes in the tool description, OR use `structuredContent` (P-09) with
+a discriminated union schema so callers can branch.
+
+---
+
+## P-27: Embedded Agent Tool ("agent mode")
+
+**Rule:** For complex multi-step workflows on a large tool surface, expose a single
+high-level tool that hosts an embedded LLM agent which calls the rest of the server's
+tools as an inner loop. Gate it behind a server policy mode (`agentOnly: true`); annotate
+it with `destructiveHint: true`; prevent recursion by removing it from the inner tool list.
+
+**Why it works:**
+
+- An outer LLM with limited tool slots can express a complex intent as a single call
+  (e.g. `use_sentry(request: "find unresolved errors from yesterday and triage them")`)
+  instead of orchestrating 5+ tool calls and burning tokens on intermediate reasoning.
+- The embedded agent has full visibility into the server's tools and specializes on the
+  domain's reasoning (search syntax, dataset choice, dispatch routing).
+- Server policy gating lets organizations turn it off if they want explicit step-by-step
+  control with audit trails per call.
+
+**Observed in:** Sentry MCP — `tools/use-sentry/handler.ts`. Recursion prevention:
+`const toolsToExclude = new Set<string>(["use_sentry"])`. Mode visibility:
+`isToolVisibleInMode(tool, context.experimentalMode ?? false)`. Description states:
+*"Pass the user's request verbatim - do not interpret or rephrase. The agent can chain
+multiple tool calls automatically. Use trace=true parameter to see which tools were called."*
+
+**Apply when:** Tool surface is large (≥10 tools), workflows commonly span 3+ tools, AND
+the inner agent has clear scope boundaries (one platform, one domain).
+
+**Always pair with:** explicit recursion prevention, `destructiveHint: true`, a `trace`
+parameter for caller debugging, AND scope/skill gating per inner tool.
+
+**Counter-consideration:** This LOOKS like a god-tool from one angle (AP-03). The line
+between *legitimate composition tool* and *god-tool* is whether the description **reads
+as a single coherent intent** ("ask Sentry") rather than a generic dispatcher ("do
+anything"). A tool called `do_thing(action_type, params)` IS a god-tool; a tool called
+`use_sentry(request: string)` with explicit Sentry-only scope is not.
+
+---
+
+## P-29: Code Mode Tool (sandboxed-execution meta-tool)
+
+**Rule:** When an upstream API has a surface so large that registering it as N MCP tools
+would exceed the LLM context budget (rough threshold: ≥500 endpoints OR ≥100k tokens of
+tool definitions), expose **2 meta-tools** instead:
+
+1. A `search(code)` tool that runs sandboxed code against a server-side spec.json (or
+   equivalent metadata).
+2. An `execute(code)` tool that runs sandboxed code against a scoped API client binding.
+
+The "sandbox" must be a real isolation boundary (V8 isolate, WebAssembly, gVisor, etc.) —
+NOT just `eval()` in the MCP server process.
+
+**Why it works:** Tool-definition tokens drop from O(N×schema_size) to O(2×schema_size).
+Cloudflare's published data: 244,047 tokens (minimal-schema-per-endpoint, 2,594 tools) →
+1,069 tokens (code mode, 2 tools). 99.6% reduction.
+
+**Required mitigations** (all four — without them this is just AP-03 with extra steps):
+
+- **Real sandbox isolation.** No `eval()` in the server process. V8 isolates, WebAssembly
+  modules, or out-of-process execution.
+- **Auth scope enforced at the binding, not the input.** The agent's code cannot escape
+  the platform's existing permission model.
+- **Dual-mode fallback.** Provide a `?codemode=false` (or equivalent) mode that registers
+  per-endpoint tools. This is the security release valve for orgs that need per-call
+  human review at the cost of context size.
+- **`destructiveHint: true` on `execute`.** There is no static analysis for "this code
+  blob is read-only" — assume the worst.
+
+**Observed in:** Cloudflare MCP — `tools: [search, execute]`, hosted at
+`mcp.cloudflare.com/mcp`. Sandbox: Cloudflare Dynamic Worker Loader API (V8 isolates).
+Spec lives server-side; agent receives only execution results.
+
+**Apply when:** Upstream API has ≥500 endpoints OR ≥100k tokens of tool schemas, AND the
+platform already has a robust token-scope permission model the sandbox can inherit.
+
+**Don't apply when:** Upstream API is small enough for traditional tools (≤50 endpoints).
+Then this pattern is just AP-03 with extra steps — sandbox overhead, harder review, no
+token-budget benefit.
+
+**Counter-consideration:** Per-call human-in-the-loop review is essentially impossible on
+a code-mode tool. A reviewer would have to read JS to know what the agent is about to do.
+For high-stakes domains (finance, prod infra mutation, PII), prefer the dual-mode fallback
+even with the token cost.
+
+**Relationship to other patterns:**
+- P-27 (Embedded Agent Tool) is the LLM-as-inner-runtime version of this. Sentry's
+  `use_sentry` runs an LLM that calls atomic tools. Cloudflare's `execute` runs JS that
+  calls APIs directly. Use P-27 when reasoning matters; use P-29 when token economics
+  dominate.
+- AP-03 (god-tool) is the antipattern this pattern deliberately violates with mitigations.
+  See the AP-03 mitigation-spectrum table for the three-point comparison
+  (mcp-bash unmitigated → cli-mcp-server mitigated → Cloudflare sanctioned).
+
+---
+
+## P-28: Embedded LLM Query Translator (candidate, 1 evidence point)
+
+**Rule:** When a tool's input is a complex domain DSL (Sentry search syntax, SQL, JQL,
+KQL) and users will sometimes pass natural language instead, use an **internal** LLM
+agent to translate NL → DSL before calling the upstream API. This LLM is invisible to
+the outer LLM-of-record — it is a server-side capability, not a tool the caller sees.
+
+**Observed in:** Sentry MCP — `search_events/handler.ts` defines `buildSearchRepairPrompt()`
+and imports `searchEventsAgent` for cases where the query parses as natural language.
+Description states: *"`query` can be natural language or Sentry search syntax. With an
+agent configured, it fixes dataset, query, fields, and sort before running."*
+
+**Status:** Candidate (1 evidence point). Promote to confirmed when a second corpus
+entry exhibits the same pattern. Likely candidates: any MCP fronting a complex query DSL
+(Snowflake, BigQuery, Elasticsearch, Splunk).
+
+**Counter-consideration:** Hidden LLM calls inside a tool inflate latency and cost in
+ways the caller cannot predict. Always document the agent presence in the tool
+description (Sentry does), and consider a `repair: false` opt-out parameter for callers
+who need determinism.
+
+---
+
 ## Pending patterns (await more corpus entries)
 
 - [x] **Pagination patterns** — P-17 (chunked text via start_index/max_length, Fetch)
   covers text. Still need a clean cursor-pagination example for structured paginated lists.
 - [x] **Resource-vs-tool decision tree** — Postgres + SQLite both 5/5 on D8; P-13
-  (entity-per-resource) and P-14 (dynamic resource) capture the two main shapes.
+  (entity-per-resource) and P-14 (dynamic resource) capture the two main shapes. P-26
+  (resource-resolver tool) is the third shape: tool-as-resource-router.
 - [ ] **Multi-tenant auth context** — GitHub has multi-deployment; still need a true
   multi-tenant example with per-request auth contexts.
 - [ ] **Streaming / long-running tools** — need to see real implementations of
@@ -530,3 +684,6 @@ re-`read_resource` to see updates. Doesn't compose cleanly with stateless tool c
   beyond the broken SQLite example (AP-11). Worth looking for in Stripe or Linear servers.
 - [ ] **Tool/Prompt duality** (same name, different entry shape, different defaults).
   Fetch exhibits it. Watch for 2+ more examples before promoting.
+- [ ] **Tool-count budget enforcement** — Sentry's `AGENTS.md` declares ≤20 target,
+  hard limit 25, and enforces via mode-filtering. Watch for a second example before
+  promoting to a pattern (currently a strong observation rather than a rule).

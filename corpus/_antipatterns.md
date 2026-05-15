@@ -44,14 +44,38 @@ hit, the LLM doesn't know it was truncated, so partial results get treated as co
 
 ## AP-03: God-tool with `method`/`action` enum — CONFIRMED
 
-**Failure mode:** One tool with `method: enum[N values]` instead of N distinct tools.
-The LLM must memorize the value-to-behavior mapping. Errors don't surface until the call
-returns failure. Conditional required params (AP-08) almost always come along for the ride.
+**Failure mode:** One tool with `method: enum[N values]` instead of N distinct tools,
+OR one tool with an unbounded-input parameter (`code: string`, `cmd: string`, `query: string`)
+that effectively encodes infinite implicit "methods." The LLM must memorize the value-to-behavior
+mapping or invent the right invocation from prose. Errors don't surface until the call returns
+failure. Conditional required params (AP-08) almost always come along for the ride.
 
-**Observed in:** **GitHub MCP** (`actions_get`, `actions_list`, `actions_run_trigger`,
-`label_write`). The description for each god-tool *is the dispatch table in prose*. The
-same server has properly-split tools elsewhere (`list_notifications`, `dismiss_notification`,
-`manage_notification_subscription`) which proves it's a design choice, not a constraint.
+**Observed in:**
+
+- **GitHub MCP** (`actions_get`, `actions_list`, `actions_run_trigger`, `label_write`).
+  The description for each god-tool *is the dispatch table in prose*. The same server has
+  properly-split tools elsewhere (`list_notifications`, `dismiss_notification`,
+  `manage_notification_subscription`) which proves it's a design choice, not a constraint.
+- **mcp-bash** (community, `patrickomatik/mcp-bash`). Two tools: `set_cwd(path)` and
+  `execute_bash(cmd: string)`. `cmd` is unbounded — any shell command. The README itself
+  flags the failure: *"There's nothing stopping the LLM from running dangerous commands
+  like `rm -rf /`."* The author's own framing is "all the potential security risks that
+  entails!" Honest documentation of an unmitigated god-tool. **Zero sandboxing — the server
+  runs in the user's shell with the user's privileges.**
+
+**The mitigated-AP-03 spectrum** (worth teaching as one frame):
+
+| Server | Shape | Mitigation | Verdict |
+|---|---|---|---|
+| `mcp-bash` | `execute_bash(cmd: string)` | None | **Unmitigated AP-03.** Lethal in any non-personal use. |
+| `MladenSU/cli-mcp-server` | `run_command(...)` + `show_security_rules` | `ALLOWED_COMMANDS` allowlist (default: `ls,cat,pwd`), `ALLOWED_FLAGS` allowlist, `ALLOW_SHELL_OPERATORS=false` (blocks `;`, `&&`, `\|`, `>`), `ALLOWED_DIR` required, command length + timeout caps | **Mitigated AP-03.** Same shape as mcp-bash but the allowlist + injection guard + path scoping flip it from unsafe to deployable. |
+| Cloudflare MCP | `search(code)` + `execute(code)` | V8 isolate sandbox (Dynamic Worker Loader API), scoped API binding, OAuth permission inheritance, dual-mode fallback (`?codemode=false`) | **P-29 (Code Mode Tool)** — legitimate AP-03 exception when API surface forces the design. |
+
+**The lesson:** AP-03 is not a binary failure. The tool *shape* is identical across all three
+(one tool, unbounded input). What differentiates them is the **mitigation stack**: allowlists,
+sandbox isolation, scoped auth, injection guards, kill-switch fallbacks. With enough mitigation,
+AP-03 becomes a published pattern (P-29). With none, it becomes a security incident waiting
+for the LLM to misroute one prompt.
 
 **Fix:** Split into separate atomic tools.
 - `actions_get_workflow`, `actions_get_workflow_run`, `actions_get_workflow_run_usage`,

@@ -1,7 +1,7 @@
 # MCP Server Architecture: Corpus + Rubric
 
-A working corpus of **10 production MCP servers** scored against a **14-dimension rubric**,
-with **25 design patterns** and **11 antipatterns** distilled and cited.
+A working corpus of **13 production MCP servers** scored against a **14-dimension rubric**,
+with **29 design patterns** and **11 antipatterns** distilled and cited.
 
 This repo is the public, free tier of an evidence-based MCP design framework.
 
@@ -18,21 +18,24 @@ This repo is the public, free tier of an evidence-based MCP design framework.
 ```
 corpus/
 ├── _rubric.md              14-dimension scoring rubric (the methodology)
-├── _patterns.md            25 design patterns with citations
+├── _patterns.md            29 design patterns with citations
 ├── _antipatterns.md        11 antipatterns with corpus evidence
 ├── _working-list.md        Backlog of servers to score
-├── reference/              6 official Anthropic reference servers
+├── reference/              7 official Anthropic reference servers
 │   ├── filesystem.md       59/70  ← highest reference-tier score
 │   ├── github.md           49/70  ← god-tool antipattern (AP-03)
 │   ├── memory.md           54/70
 │   ├── postgres.md         41/70  ← AP-04 raw SQL passthrough
 │   ├── sqlite.md           35/70  ← AP-11 safety theater (real security flaw)
+│   ├── slack.md            45/70  ← pre-modern baseline (no annotations/resources)
 │   └── fetch.md            54/70  ← canonical chunked pagination
-└── community/              4 community / vendor servers
+└── community/              6 community / vendor servers
+    ├── sentry.md           65/70  ← highest in corpus · resource resolver (P-26), embedded agent (P-27)
+    ├── stripe.md           58/70  ← thin-proxy + hosted-remote OAuth (P-21)
+    ├── cloudflare.md       57/70  ← Code Mode (P-29): 2,594 endpoints → 2 sandboxed tools
+    ├── brodels.md          56/70  ← internal CI/CD orchestrator (anonymized)
     ├── playwright.md       55/70  ← canonical browser automation
-    ├── stripe.md           58/70  ← thin-proxy + hosted-remote OAuth
-    ├── linear.md           50/70  ← first community server using resources correctly
-    └── brodels.md          56/70  ← internal CI/CD orchestrator (anonymized)
+    └── linear.md           50/70  ← first community server using resources correctly
 archetypes/
 └── _index.md               8 archetypes: catalogue + decision tree
 ```
@@ -53,7 +56,7 @@ Every antipattern has at least one counter-example.
 
 ### If you're evaluating an MCP server
 
-The 10 corpus entries are templates. Apply the rubric to any server you're considering and
+The 13 corpus entries are templates. Apply the rubric to any server you're considering and
 compare scores. Most production servers in the wild score in the 40-55 range.
 
 ### If you want a tailored architecture audit
@@ -90,11 +93,13 @@ Each dimension scores 1-5. Max score: 70.
 
 ## Notable findings
 
-### 24-point spread across 10 production servers (35-59 / 70)
+### 30-point spread across 13 production servers (35-65 / 70)
 
 Maturity ≠ design quality. The simpler reference servers (Filesystem, Fetch, Memory) score
 higher than the more featureful ones (GitHub, SQLite). Atomic-tool design beats feature-richness
-for LLM consumption.
+for LLM consumption. The top of the range (Sentry at 65/70) shows what disciplined design plus
+modern primitives — OAuth, resources, agent-mode, observability — looks like when they're all
+present simultaneously.
 
 ### The `actions_run_trigger` god-tool
 
@@ -115,12 +120,16 @@ SELECT 1; DROP TABLE users;
 The Postgres MCP, by contrast, wraps queries in `BEGIN TRANSACTION READ ONLY` then
 `ROLLBACK` — DB-layer enforcement, not string-prefix matching. Documented as AP-11.
 
-### Stripe's hosted-remote MCP architecture
+### Hosted-remote MCP convergence across Stripe, Sentry, Cloudflare
 
 The `@stripe/mcp` npm package is ~80 lines that forwards stdio over HTTPS to
 `https://mcp.stripe.com`. All tool logic is server-side, OAuth-protected, scoped via
 existing Restricted API Keys. Documented as patterns P-21 (hosted remote MCP) and
 P-25 (stdio-to-HTTPS proxy).
+
+Sentry and Cloudflare independently converged on the same architecture — three vendors,
+three independent codebases, same pattern. When three large independent domains pick the
+same shape, that's the signal that the pattern is the right answer for vendor-hosted MCPs.
 
 ### MCP resources are dramatically underused
 
@@ -148,21 +157,26 @@ Every claim cited to the corpus.
 
 ## Methodology notes
 
-### Why 10 servers
+### Why 13 servers
 
 After ~10 entries, patterns started repeating across servers — that's the signal a pattern
-is real vs. a quirk. Each new server beyond 10 marginal-improves coverage but doesn't
-materially change recommendations.
+is real vs. a quirk. We continued scoring past the convergence threshold to span more
+archetypes (Sentry for observability with embedded agent tooling, Cloudflare for Code
+Mode + sanctioned shell-wrapper mitigations, Slack as the pre-modern Anthropic baseline)
+and to surface new patterns (P-26 Resource Resolver, P-27 Embedded Agent, P-29 Code Mode)
+rather than to chase numerical breadth.
 
-### Why these 10
+### Why these 13
 
 Selected to span:
-- **Reference vs. community** (6 + 4)
+- **Reference vs. community** (7 + 6)
 - **Read-only vs. writable** (covered both)
 - **Simple vs. featureful** (Filesystem to GitHub)
-- **Local stdio vs. hosted remote** (most stdio + Stripe hosted)
+- **Local stdio vs. hosted remote** (most stdio + Stripe / Sentry / Cloudflare hosted)
 - **Different archetypes** (read-only data, writable system, search/fetch, workflow,
   memory, UI automation, telemetry, code/dev-tools)
+- **Generational coverage** (Slack as pre-modern baseline through Sentry / Cloudflare
+  as 2026-era OAuth + resources + agent-mode references)
 
 ### How scores are calibrated
 
@@ -172,7 +186,7 @@ each dimension has explicit 1-5 criteria. Disagreements are documented in the co
 
 ### Limitations
 
-- 10 entries is a small N. Bootstrap confidence in any single score is weaker than the
+- 13 entries is still a small N. Bootstrap confidence in any single score is weaker than the
   cross-server pattern signal.
 - Some corpus entries scored on documentation only (not source inspection). These are
   marked "partial" or "provisional" in the entry header.
@@ -216,6 +230,6 @@ https://github.com/gunnard/mcp-architecture-corpus
 
 ## Status
 
-**v0.1 (May 2026).** Beta. The corpus, rubric, patterns, antipatterns, and archetype
+**v0.2 (May 2026).** Beta. The corpus, rubric, patterns, antipatterns, and archetype
 catalogue are stable. The detailed archetype specifications and the audit skill are
 in private beta with 10 testers. Public skill launch targeted Q3 2026.
